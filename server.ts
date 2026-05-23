@@ -470,26 +470,38 @@ async function main() {
   log(`Git root: ${myGitRoot ?? "(none)"}`);
   log(`TTY: ${tty ?? "(unknown)"}`);
 
-  // 3. Generate initial summary via gpt-5.4-nano (non-blocking, best-effort)
-  let initialSummary = "";
-  const summaryPromise = (async () => {
-    try {
-      const branch = await getGitBranch(myCwd);
-      const recentFiles = await getRecentFiles(myCwd);
-      const summary = await generateSummary({
-        cwd: myCwd,
-        git_root: myGitRoot,
-        git_branch: branch,
-        recent_files: recentFiles,
-      });
-      if (summary) {
-        initialSummary = summary;
-        log(`Auto-summary: ${summary}`);
+  // 3. Determine initial summary. If `CLAUDE_PEERS_INITIAL_SUMMARY` is set in
+  //    the environment, use it verbatim — this lets a launcher script give the
+  //    peer a human-readable role nickname (e.g. "reviewer", "sessionA") so
+  //    `list_peers` output is intelligible at a glance.
+  //    Otherwise generate via gpt-5.4-nano (non-blocking, best-effort).
+  const envSummary = process.env.CLAUDE_PEERS_INITIAL_SUMMARY?.trim() ?? "";
+  let initialSummary = envSummary;
+  let summaryPromise: Promise<void>;
+
+  if (envSummary) {
+    log(`Initial summary from CLAUDE_PEERS_INITIAL_SUMMARY: ${envSummary}`);
+    summaryPromise = Promise.resolve();
+  } else {
+    summaryPromise = (async () => {
+      try {
+        const branch = await getGitBranch(myCwd);
+        const recentFiles = await getRecentFiles(myCwd);
+        const summary = await generateSummary({
+          cwd: myCwd,
+          git_root: myGitRoot,
+          git_branch: branch,
+          recent_files: recentFiles,
+        });
+        if (summary) {
+          initialSummary = summary;
+          log(`Auto-summary: ${summary}`);
+        }
+      } catch (e) {
+        log(`Auto-summary failed (non-critical): ${e instanceof Error ? e.message : String(e)}`);
       }
-    } catch (e) {
-      log(`Auto-summary failed (non-critical): ${e instanceof Error ? e.message : String(e)}`);
-    }
-  })();
+    })();
+  }
 
   // Wait briefly for summary, but don't block startup
   await Promise.race([summaryPromise, new Promise((r) => setTimeout(r, 3000))]);
