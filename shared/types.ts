@@ -29,6 +29,11 @@ export interface RegisterRequest {
   git_root: string | null;
   tty: string | null;
   summary: string;
+  /**
+   * Optional caller-supplied peer ID. If unset or already taken by a still-live
+   * peer, the broker falls back to a random generated ID.
+   */
+  desired_id?: string | null;
 }
 
 export interface RegisterResponse {

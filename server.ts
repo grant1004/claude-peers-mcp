@@ -494,16 +494,27 @@ async function main() {
   // Wait briefly for summary, but don't block startup
   await Promise.race([summaryPromise, new Promise((r) => setTimeout(r, 3000))]);
 
-  // 4. Register with broker
+  // 4. Register with broker.
+  //    If `CLAUDE_PEERS_PEER_ID` is set in the environment, request it as the
+  //    peer ID. Useful for launcher scripts (e.g. `claude-peers -id reviewer`)
+  //    so `list_peers` shows a human-readable role nickname instead of the
+  //    broker's 8-char random ID. The broker may still hand back a random ID
+  //    if the requested one is already held by a live peer.
+  const desiredId = process.env.CLAUDE_PEERS_PEER_ID?.trim() || null;
   const reg = await brokerFetch<RegisterResponse>("/register", {
     pid: process.pid,
     cwd: myCwd,
     git_root: myGitRoot,
     tty,
     summary: initialSummary,
+    desired_id: desiredId,
   });
   myId = reg.id;
-  log(`Registered as peer ${myId}`);
+  if (desiredId && reg.id !== desiredId) {
+    log(`Requested peer ID "${desiredId}" was unavailable; broker assigned "${reg.id}" instead`);
+  } else {
+    log(`Registered as peer ${myId}`);
+  }
 
   // If summary generation is still running, update it when done
   if (!initialSummary) {

@@ -10,6 +10,8 @@
  */
 
 import { Database } from "bun:sqlite";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type {
   RegisterRequest,
   RegisterResponse,
@@ -24,7 +26,10 @@ import type {
 } from "./shared/types.ts";
 
 const PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
-const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peers.db`;
+// Use `os.homedir()` instead of `process.env.HOME` so the default DB path
+// resolves correctly on Windows (where HOME is typically unset; Node/Bun
+// derive the home directory from USERPROFILE / SystemDrive\Users).
+const DB_PATH = process.env.CLAUDE_PEERS_DB ?? join(homedir(), ".claude-peers.db");
 
 // --- Database setup ---
 
@@ -136,13 +141,48 @@ function generateId(): string {
 // --- Request handlers ---
 
 function handleRegister(body: RegisterRequest): RegisterResponse {
-  const id = generateId();
   const now = new Date().toISOString();
 
-  // Remove any existing registration for this PID (re-registration)
-  const existing = db.query("SELECT id FROM peers WHERE pid = ?").get(body.pid) as { id: string } | null;
-  if (existing) {
-    deletePeer.run(existing.id);
+  // Remove any existing registration for this PID (re-registration after a session restart).
+  const existingByPid = db.query("SELECT id FROM peers WHERE pid = ?").get(body.pid) as
+    | { id: string }
+    | null;
+  if (existingByPid) {
+    deletePeer.run(existingByPid.id);
+  }
+
+  // Decide the peer ID. If the caller supplied `desired_id`, try to honor it.
+  // Conflict resolution mirrors the PID-based takeover above: if the previous
+  // holder's process is dead, evict and reuse the ID; otherwise fall back to
+  // generating a unique random ID.
+  let id = "";
+  if (body.desired_id && body.desired_id.trim()) {
+    const wanted = body.desired_id.trim();
+    const existingById = db.query("SELECT id, pid FROM peers WHERE id = ?").get(wanted) as
+      | { id: string; pid: number }
+      | null;
+    if (!existingById) {
+      id = wanted;
+    } else {
+      let prevAlive = false;
+      try {
+        process.kill(existingById.pid, 0);
+        prevAlive = true;
+      } catch {
+        prevAlive = false;
+      }
+      if (!prevAlive) {
+        deletePeer.run(existingById.id);
+        id = wanted;
+      } else {
+        // Previous holder still alive — fall back to random ID so registration
+        // never fails outright. The launcher can detect this drift by comparing
+        // the requested ID with the returned ID.
+        id = generateId();
+      }
+    }
+  } else {
+    id = generateId();
   }
 
   insertPeer.run(id, body.pid, body.cwd, body.git_root, body.tty, body.summary, now, now);
