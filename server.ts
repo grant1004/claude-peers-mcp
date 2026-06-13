@@ -68,6 +68,14 @@ async function isBrokerAlive(): Promise<boolean> {
 }
 
 async function ensureBroker(): Promise<void> {
+  // Opt out of auto-spawn so an external broker (e.g. the cockpit's own Rust broker)
+  // can own the port. Treat "" / "0" / "false" as not set.
+  const noAutospawn = process.env.CLAUDE_PEERS_NO_AUTOSPAWN;
+  if (noAutospawn && noAutospawn !== "0" && noAutospawn !== "false") {
+    log("CLAUDE_PEERS_NO_AUTOSPAWN set — skipping broker auto-spawn");
+    return;
+  }
+
   if (await isBrokerAlive()) {
     log("Broker already running");
     return;
