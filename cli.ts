@@ -32,6 +32,32 @@ async function brokerFetch<T>(path: string, body?: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// Find the PID(s) listening on a TCP port, cross-platform.
+function findPidsOnPort(port: number): number[] {
+  if (process.platform === "win32") {
+    // netstat -ano columns: Proto | Local Address | Foreign Address | State | PID
+    // LISTENING is TCP-only, so it doubles as a protocol filter.
+    const proc = Bun.spawnSync(["netstat", "-ano"]);
+    const pids = new Set<number>();
+    for (const line of new TextDecoder().decode(proc.stdout).split("\n")) {
+      if (!line.includes("LISTENING")) continue;
+      const cols = line.trim().split(/\s+/);
+      const local = cols[1] ?? "";
+      if (!local.endsWith(`:${port}`)) continue;
+      const pid = parseInt(cols[cols.length - 1]!, 10);
+      if (!Number.isNaN(pid)) pids.add(pid);
+    }
+    return [...pids];
+  }
+  const proc = Bun.spawnSync(["lsof", "-ti", `:${port}`]);
+  return new TextDecoder()
+    .decode(proc.stdout)
+    .trim()
+    .split("\n")
+    .map((p) => parseInt(p, 10))
+    .filter((p) => !Number.isNaN(p));
+}
+
 const cmd = process.argv[2];
 
 switch (cmd) {
@@ -133,15 +159,17 @@ switch (cmd) {
     try {
       const health = await brokerFetch<{ status: string; peers: number }>("/health");
       console.log(`Broker has ${health.peers} peer(s). Shutting down...`);
-      // Find and kill the broker process on the port
-      const proc = Bun.spawnSync(["lsof", "-ti", `:${BROKER_PORT}`]);
-      const pids = new TextDecoder()
-        .decode(proc.stdout)
-        .trim()
-        .split("\n")
-        .filter((p) => p);
+      const pids = findPidsOnPort(BROKER_PORT);
+      if (pids.length === 0) {
+        console.log(`Broker is reachable but no process found listening on port ${BROKER_PORT}.`);
+        break;
+      }
       for (const pid of pids) {
-        process.kill(parseInt(pid), "SIGTERM");
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch (e) {
+          console.log(`Failed to kill PID ${pid}: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
       console.log("Broker stopped.");
     } catch {

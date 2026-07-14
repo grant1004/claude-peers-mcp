@@ -13,6 +13,7 @@ import { Database } from "bun:sqlite";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
+  PeerId,
   RegisterRequest,
   RegisterResponse,
   HeartbeatRequest,
@@ -30,6 +31,15 @@ const PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 // resolves correctly on Windows (where HOME is typically unset; Node/Bun
 // derive the home directory from USERPROFILE / SystemDrive\Users).
 const DB_PATH = process.env.CLAUDE_PEERS_DB ?? join(homedir(), ".claude-peers.db");
+
+// --- At-least-once delivery tuning ---
+// 訊息不再「一撈出就銷帳」，也「永不因次數放棄」。銷帳（delivered=1）只由收件方
+// ack（送出回覆）或 consume（check_messages 取進 context）觸發——所以訊息不可能被靜默丟失。
+// 重投分兩段：前 BURST_ATTEMPTS 次快投（VISIBILITY_MS）保即時，之後轉慢投（SLOW_VISIBILITY_MS）
+// 當安全網、一路投到被 ack 為止，避免瘋狂洗版。死掉的 peer 由 cleanStalePeers 清其未讀訊息。
+const VISIBILITY_MS = parseInt(process.env.CLAUDE_PEERS_VISIBILITY_MS ?? "20000", 10);
+const BURST_ATTEMPTS = parseInt(process.env.CLAUDE_PEERS_BURST_ATTEMPTS ?? "5", 10);
+const SLOW_VISIBILITY_MS = parseInt(process.env.CLAUDE_PEERS_SLOW_VISIBILITY_MS ?? "300000", 10);
 
 // --- Database setup ---
 
@@ -62,6 +72,19 @@ db.run(`
     FOREIGN KEY (to_id) REFERENCES peers(id)
   )
 `);
+
+// Schema migration (idempotent): at-least-once needs per-message delivery bookkeeping.
+// Old DBs created before this change lack these columns — add them if missing.
+{
+  const cols = db.query("PRAGMA table_info(messages)").all() as { name: string }[];
+  const have = new Set(cols.map((c) => c.name));
+  if (!have.has("deliver_attempts")) {
+    db.run("ALTER TABLE messages ADD COLUMN deliver_attempts INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!have.has("last_attempt_at")) {
+    db.run("ALTER TABLE messages ADD COLUMN last_attempt_at TEXT");
+  }
+}
 
 // Clean up stale peers (PIDs that no longer exist) on startup
 function cleanStalePeers() {
@@ -119,8 +142,36 @@ const insertMessage = db.prepare(`
   VALUES (?, ?, ?, ?, 0)
 `);
 
-const selectUndelivered = db.prepare(`
+// Auto-push (redelivery) path — two-tier, never gives up (never marks delivered):
+//   - first BURST_ATTEMPTS pushes: fast retry (VISIBILITY_MS apart) for immediacy
+//   - after that: slow retry (SLOW_VISIBILITY_MS apart) forever, as a safety net
+// A message is only ever marked delivered by a real ack/consume, so it can never be
+// silently dropped — the worst case is a slow, low-frequency re-ping until acked.
+const selectDue = db.prepare(`
+  SELECT * FROM messages
+  WHERE to_id = ? AND delivered = 0
+    AND (
+      (deliver_attempts < ? AND (last_attempt_at IS NULL OR last_attempt_at <= ?))
+      OR
+      (deliver_attempts >= ? AND last_attempt_at <= ?)
+    )
+  ORDER BY sent_at ASC
+`);
+
+// Manual check_messages path: everything still undelivered for this peer (ignores
+// visibility — the model is explicitly pulling, so hand it all pending at once).
+const selectAllUndelivered = db.prepare(`
   SELECT * FROM messages WHERE to_id = ? AND delivered = 0 ORDER BY sent_at ASC
+`);
+
+const bumpAttempt = db.prepare(`
+  UPDATE messages SET deliver_attempts = deliver_attempts + 1, last_attempt_at = ? WHERE id = ?
+`);
+
+// Ack a single message, but only if it actually belongs to the peer claiming it (guard
+// against a peer acking someone else's message).
+const markDeliveredForPeer = db.prepare(`
+  UPDATE messages SET delivered = 1 WHERE id = ? AND to_id = ?
 `);
 
 const markDelivered = db.prepare(`
@@ -143,11 +194,25 @@ function generateId(): string {
 function handleRegister(body: RegisterRequest): RegisterResponse {
   const now = new Date().toISOString();
 
+  // Carry-over summary: a reconnect/restart re-registers with an empty or auto-generated
+  // summary, which would wipe the role the peer had published. Capture the prior summary
+  // for the id it's reclaiming (and for its pid) BEFORE any delete, so we can preserve it
+  // when the incoming registration doesn't bring its own.
+  let carriedSummary = "";
+  const wantedId = body.desired_id?.trim();
+  if (wantedId) {
+    const prevById = db.query("SELECT summary FROM peers WHERE id = ?").get(wantedId) as
+      | { summary: string }
+      | null;
+    if (prevById?.summary) carriedSummary = prevById.summary;
+  }
+
   // Remove any existing registration for this PID (re-registration after a session restart).
-  const existingByPid = db.query("SELECT id FROM peers WHERE pid = ?").get(body.pid) as
-    | { id: string }
+  const existingByPid = db.query("SELECT id, summary FROM peers WHERE pid = ?").get(body.pid) as
+    | { id: string; summary: string }
     | null;
   if (existingByPid) {
+    if (!carriedSummary && existingByPid.summary) carriedSummary = existingByPid.summary;
     deletePeer.run(existingByPid.id);
   }
 
@@ -185,7 +250,12 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     id = generateId();
   }
 
-  insertPeer.run(id, body.pid, body.cwd, body.git_root, body.tty, body.summary, now, now);
+  // Use the incoming summary if it carries one, otherwise fall back to the preserved prior
+  // summary so a reconnect keeps the peer's published role instead of blanking it.
+  const effectiveSummary =
+    body.summary && body.summary.trim() ? body.summary : carriedSummary;
+
+  insertPeer.run(id, body.pid, body.cwd, body.git_root, body.tty, effectiveSummary, now, now);
   return { id };
 }
 
@@ -248,14 +318,45 @@ function handleSendMessage(body: SendMessageRequest): { ok: boolean; error?: str
   return { ok: true };
 }
 
+// Auto-push path (called by each peer's MCP server every ~1s).
+// Redelivery semantics: return due messages and bump their attempt counter, but NEVER
+// mark them delivered — that happens only on explicit ack/consume, so nothing is ever
+// silently dropped. Retry cadence is two-tier (fast burst, then slow safety net forever).
 function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse {
-  const messages = selectUndelivered.all(body.id) as Message[];
+  const now = Date.now();
+  const cutoffFast = new Date(now - VISIBILITY_MS).toISOString();
+  const cutoffSlow = new Date(now - SLOW_VISIBILITY_MS).toISOString();
+  const nowIso = new Date(now).toISOString();
 
-  // Mark them as delivered
+  // Two-tier due set: fast tier while attempts < BURST_ATTEMPTS, slow tier thereafter.
+  // No give-up — messages stay pending until a real ack/consume, so nothing is dropped.
+  const messages = selectDue.all(
+    body.id, BURST_ATTEMPTS, cutoffFast, BURST_ATTEMPTS, cutoffSlow
+  ) as Message[];
+  for (const msg of messages) {
+    bumpAttempt.run(nowIso, msg.id);
+  }
+  return { messages };
+}
+
+// Explicit ack: recipient confirms it consumed these messages (replied / checked).
+// Only marks messages actually addressed to the acking peer.
+function handleAckMessages(body: { id: PeerId; message_ids: number[] }): { ok: boolean; acked: number } {
+  let acked = 0;
+  for (const mid of body.message_ids ?? []) {
+    const res = markDeliveredForPeer.run(mid, body.id);
+    acked += res.changes;
+  }
+  return { ok: true, acked };
+}
+
+// Manual pull (check_messages tool): return ALL undelivered for this peer and mark them
+// delivered immediately — being returned into the model's context IS consumption.
+function handleConsumeMessages(body: PollMessagesRequest): PollMessagesResponse {
+  const messages = selectAllUndelivered.all(body.id) as Message[];
   for (const msg of messages) {
     markDelivered.run(msg.id);
   }
-
   return { messages };
 }
 
@@ -297,6 +398,10 @@ Bun.serve({
           return Response.json(handleSendMessage(body as SendMessageRequest));
         case "/poll-messages":
           return Response.json(handlePollMessages(body as PollMessagesRequest));
+        case "/ack-messages":
+          return Response.json(handleAckMessages(body as { id: PeerId; message_ids: number[] }));
+        case "/consume-messages":
+          return Response.json(handleConsumeMessages(body as PollMessagesRequest));
         case "/unregister":
           handleUnregister(body as { id: string });
           return Response.json({ ok: true });

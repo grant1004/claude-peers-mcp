@@ -19,6 +19,8 @@ export interface Message {
   text: string;
   sent_at: string; // ISO timestamp
   delivered: boolean;
+  deliver_attempts?: number; // how many times auto-push has delivered this (at-least-once)
+  last_attempt_at?: string | null; // ISO timestamp of last push (visibility-timeout basis)
 }
 
 // --- Broker API types ---
@@ -69,4 +71,15 @@ export interface PollMessagesRequest {
 
 export interface PollMessagesResponse {
   messages: Message[];
+}
+
+// Recipient confirms it consumed these messages (replied or ran check_messages).
+export interface AckMessagesRequest {
+  id: PeerId;
+  message_ids: number[];
+}
+
+export interface AckMessagesResponse {
+  ok: boolean;
+  acked: number;
 }

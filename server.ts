@@ -20,6 +20,9 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { fileURLToPath } from "node:url";
+import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import type {
   PeerId,
   Peer,
@@ -154,6 +157,25 @@ let myId: PeerId | null = null;
 let myCwd = process.cwd();
 let myGitRoot: string | null = null;
 
+// Messages that have been auto-pushed to this session but not yet acknowledged.
+// The broker keeps redelivering them until we ack (proof of consumption) or it gives up.
+// We ack when the model demonstrably consumed them: replied via send_message, or pulled
+// via check_messages. Auto-push alone is NOT proof — the notification may be dropped.
+const pendingAck = new Set<number>();
+
+// Ack the currently-pending messages back to the broker. Snapshot-then-clear so a failed
+// ack re-queues the ids for a later retry rather than losing them.
+async function ackPending(): Promise<void> {
+  if (!myId || pendingAck.size === 0) return;
+  const ids = [...pendingAck];
+  pendingAck.clear();
+  try {
+    await brokerFetch("/ack-messages", { id: myId, message_ids: ids });
+  } catch {
+    for (const id of ids) pendingAck.add(id);
+  }
+}
+
 // --- MCP Server ---
 
 const mcp = new Server(
@@ -168,6 +190,8 @@ const mcp = new Server(
 IMPORTANT: When you receive a <channel source="claude-peers" ...> message, RESPOND IMMEDIATELY. Do not wait until your current task is finished. Pause what you are doing, reply to the message using send_message, then resume your work. Treat incoming peer messages like a coworker tapping you on the shoulder — answer right away, even if you're in the middle of something.
 
 Read the from_id, from_summary, and from_cwd attributes to understand who sent the message. Reply by calling send_message with their from_id.
+
+Delivery is at-least-once: a message keeps being redelivered until you acknowledge it by either replying (send_message) or calling check_messages. So if you see the SAME message twice, it is a harmless redelivery — just acknowledge it once. If a peer message does not require a reply, call check_messages once to acknowledge it and stop the redelivery.
 
 Available tools:
 - list_peers: Discover other Claude Code instances (scope: machine/directory/repo)
@@ -329,6 +353,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             isError: true,
           };
         }
+        // Sending a message is strong proof this session saw whatever prompted the reply —
+        // ack any pending inbound so the broker stops redelivering it.
+        await ackPending();
         return {
           content: [{ type: "text" as const, text: `Message sent to peer ${to_id}` }],
         };
@@ -379,7 +406,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         };
       }
       try {
-        const result = await brokerFetch<PollMessagesResponse>("/poll-messages", { id: myId });
+        // Manual pull uses /consume-messages: it returns ALL undelivered for this peer and
+        // marks them delivered server-side (being placed into context IS consumption).
+        const result = await brokerFetch<PollMessagesResponse>("/consume-messages", { id: myId });
+        // Anything auto-push had pending is now consumed here — clear local tracking.
+        pendingAck.clear();
         if (result.messages.length === 0) {
           return {
             content: [{ type: "text" as const, text: "No new messages." }],
@@ -455,6 +486,12 @@ async function pollAndPushMessages() {
         },
       });
 
+      // Track as pending — do NOT treat the push as delivered. The broker will keep
+      // redelivering (up to MAX_ATTEMPTS) until we ack, which happens only once the model
+      // provably consumed it (replied or ran check_messages). A dropped notification thus
+      // gets retried instead of being silently lost.
+      pendingAck.add(msg.id);
+
       log(`Pushed message from ${msg.from_id}: ${msg.text.slice(0, 80)}`);
     }
   } catch (e) {
@@ -524,6 +561,18 @@ async function main() {
     log(`Registered as peer ${myId}`);
   }
 
+  // Cache peer ID to file so statusline (sibling child of Claude Code) can read it.
+  // Key by ppid (= Claude Code PID) since both MCP server and statusline share the same parent.
+  const peerCacheDir = join(homedir(), ".claude", "peers");
+  const peerCacheFile = join(peerCacheDir, `${process.ppid}.id`);
+  try {
+    mkdirSync(peerCacheDir, { recursive: true });
+    writeFileSync(peerCacheFile, myId);
+    log(`Cached peer ID to ${peerCacheFile}`);
+  } catch (e) {
+    log(`Failed to cache peer ID (non-critical): ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   // If summary generation is still running, update it when done
   if (!initialSummary) {
     summaryPromise.then(async () => {
@@ -556,10 +605,24 @@ async function main() {
     }
   }, HEARTBEAT_INTERVAL_MS);
 
-  // 8. Clean up on exit
+  // 8. Parent-process watchdog: if Claude Code dies, this MCP server becomes
+  //    an orphan. Detect by checking if the original parent PID is still alive.
+  const originalPpid = process.ppid;
+  const watchdogTimer = setInterval(() => {
+    try {
+      process.kill(originalPpid, 0);
+    } catch {
+      log(`Parent process ${originalPpid} is gone, shutting down`);
+      clearInterval(watchdogTimer);
+      cleanup();
+    }
+  }, 5000);
+
+  // 9. Clean up on exit
   const cleanup = async () => {
     clearInterval(pollTimer);
     clearInterval(heartbeatTimer);
+    try { unlinkSync(peerCacheFile); } catch {}
     if (myId) {
       try {
         await brokerFetch("/unregister", { id: myId });
