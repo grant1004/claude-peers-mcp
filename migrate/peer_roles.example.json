@@ -1,0 +1,21 @@
+{
+  "_doc": "peer 身分登記表（範本）。把這份改成【新機自己的 peer 角色】、存成 ~/.claude/tasks/peer_roles.json。peer_bootstrap.js 全開 session 時讀這裡自我辨識。以下 roles 是範例，請整段換掉。",
+  "_common": {
+    "_note": "以下路徑若新機同為 Windows-grant 可照用；不同使用者/OS 請改成該機實際家目錄，或直接刪掉用不到的欄位（bootstrap 缺欄位不會壞）",
+    "protocol": "C:/Users/<你的使用者>/.claude/tasks/worker_protocol.md",
+    "gatekeeper": "本機負責 Discord/協調的主 session（若這台沒有守門員可刪此欄）",
+    "first_actions": ["set_summary 宣告角色+現狀（這是你的心跳）", "待命等派工"]
+  },
+  "roles": {
+    "範例A": {
+      "title": "角色標題（例：pool worker）",
+      "duty": "這個 peer 負責什麼、接誰的派工",
+      "threads": {}
+    },
+    "範例B": {
+      "title": "另一個角色",
+      "duty": "職責描述",
+      "threads": {}
+    }
+  }
+}
