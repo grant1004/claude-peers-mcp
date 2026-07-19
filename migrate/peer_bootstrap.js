@@ -71,6 +71,11 @@ if (role.channels && Object.keys(role.channels).length) {
 if (role.tools) lines.push(`【現成工具】${role.tools}`)
 if (role.backup) lines.push(`【你的備援】${role.backup}`)
 if (role.note) lines.push(`【備註】${role.note}`)
+if (role.memory && Object.keys(role.memory).length) {
+  lines.push('')
+  lines.push('【你的記憶三源｜開機必讀（讀完再宣告待命）】')
+  for (const [k, v] of Object.entries(role.memory)) lines.push(`- ${k}：${v}`)
+}
 lines.push('')
 lines.push('【通用協議】')
 lines.push(`- 讀協議：${c.protocol}`)
@@ -78,6 +83,10 @@ lines.push(`- 路由表：${c.routes}`)
 lines.push(`- 載入你這串的工作記憶：${c.memory_load}（把 <THREAD_ID> 換成你綁的串）`)
 lines.push(`- 對口：${c.gatekeeper}`)
 lines.push(`- 交付方式：${c.delivery}`)
+if (c.memory_system) {
+  lines.push('')
+  lines.push(`【記憶系統】${c.memory_system}`)
+}
 lines.push('')
 lines.push('【現在就做】')
 ;(c.first_actions || []).forEach((a, i) => lines.push(`${i + 1}. ${a}`))

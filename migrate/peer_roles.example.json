@@ -1,21 +1,42 @@
 {
-  "_doc": "peer 身分登記表（範本）。把這份改成【新機自己的 peer 角色】、存成 ~/.claude/tasks/peer_roles.json。peer_bootstrap.js 全開 session 時讀這裡自我辨識。以下 roles 是範例，請整段換掉。",
+  "_doc": "peer 身分登記表（範本）。把這份改成【新機自己的 peer 角色】、存成 ~/.claude/tasks/peer_roles.json。peer_bootstrap.js 在全開/清空 session 時讀這裡自我辨識。以下 _common 與 roles 都是範例，請整段換成該機實況。缺欄位不會壞（bootstrap 全部做存在檢查）。每個 role 的 memory 欄＝該 peer 的『記憶三源』，bootstrap 會印成『開機必讀』；_common.memory_system 描述該機記憶管線，bootstrap 印成『記憶系統』。",
   "_common": {
-    "_note": "以下路徑若新機同為 Windows-grant 可照用；不同使用者/OS 請改成該機實際家目錄，或直接刪掉用不到的欄位（bootstrap 缺欄位不會壞）",
+    "_note": "路徑若新機同為 Windows 可把 <你的使用者> 換成該機帳號照用；不同 OS/使用者請改成該機實際家目錄，或直接刪掉用不到的欄位",
     "protocol": "C:/Users/<你的使用者>/.claude/tasks/worker_protocol.md",
+    "routes": "C:/Users/<你的使用者>/.claude/tasks/thread_routes.json",
+    "memory_load": "node C:/Users/<你的使用者>/.claude/tasks/memory.js load <THREAD_ID>",
     "gatekeeper": "本機負責 Discord/協調的主 session（若這台沒有守門員可刪此欄）",
-    "first_actions": ["set_summary 宣告角色+現狀（這是你的心跳）", "待命等派工"]
+    "delivery": "檔案優先：成品寫 deliverables/<主題夾>/<THREAD_ID>-<簡稱>.md，再 send_message 通知守門員路徑（訊息會重投，仍以檔案為交付物）",
+    "memory_note": "『記憶三源』定義：① 記憶結構＝你的 ctx 檔（結構化長期脈絡：用戶/能力範圍/歷史）② 資料庫＝memory.js 動態衰退記憶（規則/偏好/進行中任務）③ 文件＝worker_protocol.md＋thread_routes.json 你的段＋過往 deliverables。每個 role 的 memory 欄放你專屬的三源路徑。",
+    "memory_system": "（範例｜描述該機記憶管線，新機沒有這套就刪掉本欄）對話原文由 global hooks 自動落地本地 JSONL，一天數次由 background agent 蒸餾寫入 memory.js 長期記憶＋更新雲端 context；你的職責＝工作里程碑用 memory.js add task/event 落地＋交付落檔 deliverables/。你開機 memory.js load 讀到的就是這套管線的產出。",
+    "first_actions": [
+      "讀 protocol（worker_protocol.md）確認架構與交付規則",
+      "開機必讀你的『記憶三源』（見上方【你的記憶三源】）：① 記憶結構＝你的 ctx 檔 ② 資料庫＝memory.js load <你的THREAD_ID> ③ 文件＝thread_routes.json 你的段＋過往 deliverables",
+      "set_summary 宣告角色＋現狀（心跳，守門員靠它判你活著）",
+      "待命等守門員轉發/派工"
+    ]
   },
   "roles": {
-    "範例A": {
-      "title": "角色標題（例：pool worker）",
-      "duty": "這個 peer 負責什麼、接誰的派工",
-      "threads": {}
+    "範例-pool-worker": {
+      "title": "pool worker",
+      "duty": "純 pool worker；接守門員或 lead 直派的子任務。無固定綁串",
+      "threads": {},
+      "memory": {
+        "記憶結構": "無固定綁串→開機不需載串記憶",
+        "資料庫": "接派工時才載：node C:/Users/<你的使用者>/.claude/tasks/memory.js load <派工單指定的THREAD_ID>",
+        "文件": "worker_protocol.md（協議）＋thread_routes.json（開機掃一遍了解全域路由，接工時看目標串的段）"
+      }
     },
-    "範例B": {
-      "title": "另一個角色",
-      "duty": "職責描述",
-      "threads": {}
+    "範例-綁串-worker": {
+      "title": "某討論串對話 worker",
+      "duty": "負責某討論串的對話；守門員把該串訊息轉發給你，你產可貼版回守門員；長回覆/含數據走 deliverables 落檔",
+      "threads": { "某串別名": "<THREAD_ID>" },
+      "memory": {
+        "記憶結構": "C:/Users/<你的使用者>/.claude/tasks/ctx_<THREAD_ID>.md（該串 context）",
+        "資料庫": "node C:/Users/<你的使用者>/.claude/tasks/memory.js load <THREAD_ID>",
+        "文件": "worker_protocol.md＋thread_routes.json 的 routes.<THREAD_ID> 段＋deliverables/<主題>/<THREAD_ID>-*.md"
+      },
+      "note": "選填備註（例：誰經授權可用此串）"
     }
   }
 }

@@ -43,6 +43,27 @@
 
 ---
 
+## 守門員啟動器 claude-dc.bat（選用｜新機要同時接 Discord plugin ＋ claude-peers push 才需要）
+
+一般 peer 用 `claude-peers.ps1` 即可。但若這台要跑「守門員」——同一個 session **既接 Discord plugin channel、又要收 claude-peers 推播**——啟動器要同時載兩個 channel 並帶穩定身分。放一支 `<家目錄>\bin\claude-dc.bat`：
+
+```bat
+@echo off
+set CLAUDE_DISCORD=1
+set CLAUDE_PEERS_PEER_ID=守門員
+claude --dangerously-skip-permissions --channels plugin:discord@claude-plugins-official --dangerously-load-development-channels server:claude-peers %*
+```
+
+關鍵兩行（少了就收不到 peer 推播、只能手動 check_messages）：
+- `set CLAUDE_PEERS_PEER_ID=守門員` — 穩定身分，讓 bootstrap 認得＋重連保留 summary（不設＝每次隨機 id）
+- 啟動參數的 `--dangerously-load-development-channels server:claude-peers` — 把 claude-peers 當 **channel** 載入才有 push。它與 `--channels plugin:discord@...`（Discord）可並存於同一 session（已驗證）
+
+**編碼注意（Windows 必看）**：這支 .bat 含中文（id、註解）時，必須存成 **CRLF 行尾 + UTF-8（無 BOM）**。若存成 LF 行尾，cmd.exe 會誤解析含中文的 `set` 行、id 讀成空或繼承值。中文 id 還依賴系統層 UTF-8 codepage（`chcp` 顯示 65001）；若該機非 65001，在 `@echo off` 後加一行 `chcp 65001 >nul`。想省事就用**純 ASCII 的 id**（例 `gatekeeper`），無以上任何顧慮。
+
+改檔前先備份（`copy claude-dc.bat claude-dc.bat.bak`）；改壞用 `copy /Y claude-dc.bat.bak claude-dc.bat` 回滾。生效要重開該 session。
+
+---
+
 ## 前提／注意
 - 新機要有 **bun**（claude-peers-mcp 用）、**node**（跑 peer_bootstrap.js）
 - Layer 2 的自動認角色，前提是 peer 啟動時帶了 `CLAUDE_PEERS_PEER_ID`（用 claude-peers.ps1 或手動設）
